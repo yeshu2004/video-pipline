@@ -1,20 +1,3 @@
-1. Client uploads → Object Storage (raw)
-2. Backend emits VIDEO_UPLOADED
-3. Fan-out queues:
-   - transcode_240
-   - transcode_480
-   - transcode_720
-   - transcript
-4. Workers:
-   - Read raw video from storage
-   - Produce artifacts
-   - Upload results
-5. Airflow:
-   - Waits for all tasks
-   - Generates master playlist
-   - Marks video READY
-
-
 # Plan: Adaptive Bitrate Streaming
 1. upload to blob storage using singned url
 2. after the video is upload then create event.
