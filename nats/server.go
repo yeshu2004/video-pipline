@@ -48,8 +48,8 @@ func (nats *Nats) CreateVideoStream(ctx context.Context) error {
 	return err
 }
 
-func (nats *Nats) PublishVideoUplodedEvent(ctx context.Context, id int, payload []byte) error {
-	_, err := nats.js.Publish(ctx, "VIDEO.uploaded", payload, jetstream.WithMsgID(fmt.Sprintf("video-%d", id)))
+func (nats *Nats) PublishVideoUplodedEvent(ctx context.Context, key string, payload []byte) error {
+	_, err := nats.js.Publish(ctx, "VIDEO.uploaded", payload, jetstream.WithMsgID(fmt.Sprintf("video-%d", key)))
 	return err
 }
 
@@ -104,9 +104,9 @@ func (nats *Nats) ConsumeFFmpeg480Event(ctx context.Context) error {
 
 			for msg := range msgs.Messages() {
 				if err := processVideoForFFmpeg(ctx, "480", msg.Data()); err != nil {
-					log.Println("480 processing failed:", err);
-					msg.Nak();
-					continue;
+					log.Println("480 processing failed:", err)
+					msg.Nak()
+					continue
 				}
 
 				msg.Ack()
@@ -126,17 +126,16 @@ func processVideoForFFmpeg(ctx context.Context, videoQuality string, eventData [
 		return fmt.Errorf("json unmarshal error: %v", err)
 	}
 
-	log.Printf("processing video %d at %dp", payload.VideoID, quality);
+	log.Printf("processing video with key %s at %dp", payload.Key, quality)
 
 	filePath := ""
 	outputFilePath := ""
-	
+
 	//1. download the video using http.get
 	//2. copy into raw folder
-	//3. run the ffmpeg command 
-	//4. store in processed folder 
+	//3. run the ffmpeg command
+	//4. store in processed folder
 	//5. upload back to cloud
-
 
 	scale := fmt.Sprintf("scale=-2:%d", quality)
 	cmd := exec.CommandContext(
@@ -150,10 +149,10 @@ func processVideoForFFmpeg(ctx context.Context, videoQuality string, eventData [
 		outputFilePath,
 	)
 
-	b, err := cmd.CombinedOutput();
+	b, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ffmpeg error: %v, output: %s", err, string(b))
 	}
 
-	return nil;
+	return nil
 }
