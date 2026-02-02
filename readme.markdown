@@ -12,20 +12,4 @@
    - Generates master playlist
    - Marks video READY
 6. warm CDN cache
-7. deliver to user based on bandwidht
-
-# Folder Structure
-
-video-pipeline/
-├── uploader/
-├── workers/
-│   ├── transcode_240.py
-│   ├── transcode_480.py
-│   ├── transcode_720.py
-│   └── transcript.py
-├── storage/
-│   ├── raw/
-│   └── processed/
-├── airflow/
-│   └── dags/video_dag.py
-└── docker-compose.yml
+7. deliver to user based on bandwidth
