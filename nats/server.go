@@ -11,10 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-
-	// "path/filepath"
-
-	// "os/exec"
 	"strconv"
 	"time"
 
@@ -230,12 +226,12 @@ func processVideoForFFmpeg(ctx context.Context, awsService *aws.S3Service, video
 		return fmt.Errorf("json unmarshal error: %v", err)
 	}
 
-	log.Printf("processing video with key %s at %dp\n", payload.Key, quality)
+	log.Printf("(%s) processing video with key %s at %dp\n", videoQuality, payload.Key, quality)
 
 	// 0. fetch the presigned url from s3 service
 	url, err := awsService.FetchGetPresignedURL(ctx, payload.Bucket, payload.Key);
 	if err != nil{
-		return  fmt.Errorf("error fetching sigend url of given file (%s) over bucket (%s): error: %v", payload.Key, payload.Bucket, err);
+		return  fmt.Errorf("(%s) error fetching presigned url of given file (%s) over bucket (%s): error: %v", videoQuality, payload.Key, payload.Bucket, err);
 	}
 
 	// 1. download the video using http.get
@@ -244,9 +240,9 @@ func processVideoForFFmpeg(ctx context.Context, awsService *aws.S3Service, video
 		return err;
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to download video: status %d", resp.StatusCode)
+		return fmt.Errorf("(%s) failed to download video: status %d", videoQuality, resp.StatusCode)
 	}
-	log.Printf("downloaded video with key %s from s3 bucket successfully\n", payload.Key);	
+	log.Printf("(%s) downloaded video with key %s from s3 bucket successfully\n", videoQuality, payload.Key);	
 	defer resp.Body.Close()
 
 	//2. create local directory and file
@@ -263,22 +259,22 @@ func processVideoForFFmpeg(ctx context.Context, awsService *aws.S3Service, video
 	}
 
 	defer out.Close()
-	log.Printf("created local file for key %s successfully\n", payload.Key);
+	log.Printf("(%s) created local file for key %s successfully\n", videoQuality, payload.Key);
 
 	// 3. copy the downloaded content into local file
-	log.Printf("copying the file (%s) locally..\n.", payload.Key);
+	log.Printf("(%s) copying the file (%s) locally..\n.", videoQuality, payload.Key);
 	_, err = io.Copy(out, resp.Body)
 	if err != nil {
 		return err
 	}
-	log.Printf("saved video to local file for key %s successfully\n", payload.Key);
+	log.Printf("(%s) saved video to local file for key %s successfully\n", videoQuality, payload.Key);
 
 	// 4. run the ffmpeg command & store in processed folder
 	outputFolder:= fmt.Sprintf("processed/%sp", videoQuality);
 	if err := os.MkdirAll(outputFolder, 0755);err != nil{
 		return err;
 	}
-	log.Printf("created output directory %s successfully\n", outputFolder);
+	log.Printf("(%s) created output directory %s successfully\n", videoQuality, outputFolder);
 
 	outputFilePath := filepath.Join(outputFolder, filepath.Base(payload.Key));
 
@@ -296,11 +292,11 @@ func processVideoForFFmpeg(ctx context.Context, awsService *aws.S3Service, video
 
 	b, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("ffmpeg error: %v, output: %s", err, string(b))
+		return fmt.Errorf("(%s) ffmpeg error: %v, output: %s", videoQuality, err, string(b))
 	}
 	// //5. upload back to cloud
 
 
-	log.Printf("processing video done with key %s at %dp\n", payload.Key, quality)
+	log.Printf("(%s) processing video done with key %s at %dp\n", videoQuality, payload.Key, quality)
 	return nil
 }
