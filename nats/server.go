@@ -63,6 +63,20 @@ func (nats *Nats) PublishVideoUplodedEvent(ctx context.Context, key string, payl
 	return err
 }
 
+func (nats *Nats) CreateFFmpeg240Consumer(ctx context.Context) error {
+	_, err := nats.js.CreateConsumer(ctx, "VIDEO", jetstream.ConsumerConfig{
+		Name:          "ffmpeg-240-worker",
+		Durable:       "ffmpeg-240-worker",
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		AckWait:       30 * time.Second,
+		DeliverPolicy: jetstream.DeliverNewPolicy,
+		ReplayPolicy:  jetstream.ReplayInstantPolicy,
+		MaxDeliver:    5,
+		FilterSubject: "VIDEO.uploaded",
+	})
+	return err
+}
+
 func (nats *Nats) CreateFFmpeg480Consumer(ctx context.Context) error {
 	_, err := nats.js.CreateConsumer(ctx, "VIDEO", jetstream.ConsumerConfig{
 		Name:          "ffmpeg-480-worker",
@@ -129,6 +143,82 @@ func (nats *Nats) ConsumeFFmpeg480Event(ctx context.Context) error {
 	}
 }
 
+func (nats *Nats) ConsumeFFmpeg720Event(ctx context.Context) error {
+	c, err := nats.js.Consumer(ctx, "VIDEO", "ffmpeg-720-worker")
+	if err != nil {
+		return err
+	}
+
+	godotenv.Load();
+	cfg := aws.LoadAwsConifg();
+	service := aws.NewS3Service(cfg);
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("shutting down booking event consumer...")
+			return nil
+		default:
+			msgs, err := c.Fetch(1, jetstream.FetchMaxWait(30*time.Second))
+			if err != nil {
+				if errors.Is(err, jetstream.ErrNotJSMessage) {
+					continue
+				}
+				log.Println("fetch error:", err)
+				continue
+			}
+
+			for msg := range msgs.Messages() {
+				if err := processVideoForFFmpeg(ctx, service, "720", msg.Data()); err != nil {
+					log.Println("720 processing failed:", err)
+					msg.Nak()
+					continue
+				}
+
+				msg.Ack()
+			}
+		}
+	}
+}
+
+func (nats *Nats) ConsumeFFmpeg240Event(ctx context.Context) error {
+	c, err := nats.js.Consumer(ctx, "VIDEO", "ffmpeg-240-worker")
+	if err != nil {
+		return err
+	}
+
+	godotenv.Load();
+	cfg := aws.LoadAwsConifg();
+	service := aws.NewS3Service(cfg);
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("shutting down booking event consumer...")
+			return nil
+		default:
+			msgs, err := c.Fetch(1, jetstream.FetchMaxWait(30*time.Second))
+			if err != nil {
+				if errors.Is(err, jetstream.ErrNotJSMessage) {
+					continue
+				}
+				log.Println("fetch error:", err)
+				continue
+			}
+
+			for msg := range msgs.Messages() {
+				if err := processVideoForFFmpeg(ctx, service, "240", msg.Data()); err != nil {
+					log.Println("240 processing failed:", err)
+					msg.Nak()
+					continue
+				}
+
+				msg.Ack()
+			}
+		}
+	}
+}
+
 func processVideoForFFmpeg(ctx context.Context, awsService *aws.S3Service, videoQuality string, eventData []byte) error {
 	quality, err := strconv.Atoi(videoQuality)
 	if err != nil {
@@ -160,28 +250,31 @@ func processVideoForFFmpeg(ctx context.Context, awsService *aws.S3Service, video
 	defer resp.Body.Close()
 
 	//2. create local directory and file
-	localPath := payload.Key;
-	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+	filename := filepath.Base(payload.Key)
+	rawPath := filepath.Join("raw", filename)
+
+	if err := os.MkdirAll("raw", 0755); err != nil {
 		return err
 	}
-	log.Printf("created local directory for key %s successfully\n", payload.Key);
 
-	out, err := os.Create(localPath)
+	out, err := os.Create(rawPath)
 	if err != nil {
 		return err
 	}
+
 	defer out.Close()
 	log.Printf("created local file for key %s successfully\n", payload.Key);
 
-	//3. copy the downloaded content into local file
+	// 3. copy the downloaded content into local file
+	log.Printf("copying the file (%s) locally..\n.", payload.Key);
 	_, err = io.Copy(out, resp.Body)
 	if err != nil {
 		return err
 	}
 	log.Printf("saved video to local file for key %s successfully\n", payload.Key);
 
-	// //3. run the ffmpeg command
-	outputFolder:= "processed/480p"
+	// 4. run the ffmpeg command & store in processed folder
+	outputFolder:= fmt.Sprintf("processed/%sp", videoQuality);
 	if err := os.MkdirAll(outputFolder, 0755);err != nil{
 		return err;
 	}
@@ -193,7 +286,7 @@ func processVideoForFFmpeg(ctx context.Context, awsService *aws.S3Service, video
 	cmd := exec.CommandContext(
 		ctx,
 		"ffmpeg",
-		"-i", localPath,
+		"-i", rawPath,
 		"-vf", scale,
 		"-c:v", "libx264",
 		"-crf", "23",
@@ -205,7 +298,6 @@ func processVideoForFFmpeg(ctx context.Context, awsService *aws.S3Service, video
 	if err != nil {
 		return fmt.Errorf("ffmpeg error: %v, output: %s", err, string(b))
 	}
-	// //4. store in processed folder
 	// //5. upload back to cloud
 
 
