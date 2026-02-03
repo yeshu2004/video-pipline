@@ -54,8 +54,29 @@ func (nats *Nats) CreateVideoStream(ctx context.Context) error {
 	return err
 }
 
+// PUBLISH EVENT
 func (nats *Nats) PublishVideoUplodedEvent(ctx context.Context, key string, payload []byte) error {
-	_, err := nats.js.Publish(ctx, "VIDEO.uploaded", payload, jetstream.WithMsgID(fmt.Sprintf("video-%s", key)))
+	_, err := nats.js.Publish(ctx, "VIDEO.uploaded", payload, jetstream.WithMsgID(fmt.Sprintf("video-uploaded-%s", key)))
+	return err
+}
+
+func (nats *Nats) PublishVideoDownloadedEvent(ctx context.Context, key string, payload []byte) error{
+	_, err := nats.js.Publish(ctx, "VIDEO.downloaded", payload, jetstream.WithMsgID(fmt.Sprintf("video-downloaded-%s", key)))
+	return err;
+}
+
+// CREATE CONSUMER
+func(nats *Nats) CreateVideoDownloadConsumer(ctx context.Context) error{
+	_, err := nats.js.CreateConsumer(ctx, "VIDEO", jetstream.ConsumerConfig{
+		Name:          "video-download-worker",
+		Durable:       "video-download-worker",
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		AckWait:       30 * time.Second,
+		DeliverPolicy: jetstream.DeliverNewPolicy,
+		ReplayPolicy:  jetstream.ReplayInstantPolicy,
+		MaxDeliver:    5,
+		FilterSubject: "VIDEO.uploaded",
+	})
 	return err
 }
 
@@ -68,7 +89,7 @@ func (nats *Nats) CreateFFmpeg240Consumer(ctx context.Context) error {
 		DeliverPolicy: jetstream.DeliverNewPolicy,
 		ReplayPolicy:  jetstream.ReplayInstantPolicy,
 		MaxDeliver:    5,
-		FilterSubject: "VIDEO.uploaded",
+		FilterSubject: "VIDEO.downloaded",
 	})
 	return err
 }
@@ -82,7 +103,7 @@ func (nats *Nats) CreateFFmpeg480Consumer(ctx context.Context) error {
 		DeliverPolicy: jetstream.DeliverNewPolicy,
 		ReplayPolicy:  jetstream.ReplayInstantPolicy,
 		MaxDeliver:    5,
-		FilterSubject: "VIDEO.uploaded",
+		FilterSubject: "VIDEO.downloaded",
 	})
 	return err
 }
@@ -96,9 +117,48 @@ func (nats *Nats) CreateFFmpeg720Consumer(ctx context.Context) error {
 		DeliverPolicy: jetstream.DeliverNewPolicy,
 		ReplayPolicy:  jetstream.ReplayInstantPolicy,
 		MaxDeliver:    5,
-		FilterSubject: "VIDEO.uploaded",
+		FilterSubject: "VIDEO.downloaded",
 	})
 	return err
+}
+
+
+// CONSUME EVENT
+func (nats *Nats) ConsumeVideoDownlodEvent(ctx context.Context) error{
+	c, err := nats.js.Consumer(ctx, "VIDEO", "video-download-worker");
+	if err != nil{
+		return err;
+	}
+
+	godotenv.Load();
+	cfg := aws.LoadAwsConifg();
+	service := aws.NewS3Service(cfg);
+
+	for{
+		select{
+		case <- ctx.Done():
+			log.Println("shutting down video download event consumer...")
+			return nil
+		default:
+			msgs, err := c.Fetch(1, jetstream.FetchMaxWait(30*time.Second))
+			if err != nil {
+				if errors.Is(err, jetstream.ErrNotJSMessage) {
+					continue
+				}
+				log.Println("fetch error:", err)
+				continue
+			}
+
+			for msg := range msgs.Messages() {
+				if err := nats.processEventForDownload(ctx, service ,msg.Data()); err != nil{
+					log.Printf("video download consumer faile: %v\n", err);
+					msg.Nak()
+					continue
+				}
+				msg.Ack();
+			}
+		}
+	}
 }
 
 func (nats *Nats) ConsumeFFmpeg480Event(ctx context.Context) error {
@@ -215,23 +275,17 @@ func (nats *Nats) ConsumeFFmpeg240Event(ctx context.Context) error {
 	}
 }
 
-func processVideoForFFmpeg(ctx context.Context, awsService *aws.S3Service, videoQuality string, eventData []byte) error {
-	quality, err := strconv.Atoi(videoQuality)
-	if err != nil {
-		return err
-	}
 
-	var payload *models.Payload
+// HELPER FUNCTION
+func (nats *Nats) processEventForDownload(ctx context.Context, awsService *aws.S3Service, eventData []byte) error {
+	var payload models.Payload;
 	if err := json.Unmarshal(eventData, &payload); err != nil {
 		return fmt.Errorf("json unmarshal error: %v", err)
 	}
 
-	log.Printf("(%s) processing video with key %s at %dp\n", videoQuality, payload.Key, quality)
-
-	// 0. fetch the presigned url from s3 service
 	url, err := awsService.FetchGetPresignedURL(ctx, payload.Bucket, payload.Key);
 	if err != nil{
-		return  fmt.Errorf("(%s) error fetching presigned url of given file (%s) over bucket (%s): error: %v", videoQuality, payload.Key, payload.Bucket, err);
+		return  fmt.Errorf("(%s) error fetching presigned url of given file over bucket (%s): error: %v", payload.Key, payload.Bucket, err);
 	}
 
 	// 1. download the video using http.get
@@ -240,9 +294,9 @@ func processVideoForFFmpeg(ctx context.Context, awsService *aws.S3Service, video
 		return err;
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("(%s) failed to download video: status %d", videoQuality, resp.StatusCode)
+		return fmt.Errorf("(%s) failed to download video: status %d", payload.Key,resp.StatusCode)
 	}
-	log.Printf("(%s) downloaded video with key %s from s3 bucket successfully\n", videoQuality, payload.Key);	
+	log.Printf("(%s) downloaded video from s3 bucket successfully\n", payload.Key);	
 	defer resp.Body.Close()
 
 	//2. create local directory and file
@@ -259,17 +313,40 @@ func processVideoForFFmpeg(ctx context.Context, awsService *aws.S3Service, video
 	}
 
 	defer out.Close()
-	log.Printf("(%s) created local file for key %s successfully\n", videoQuality, payload.Key);
+	log.Printf("(%s) created local file successfully\n", payload.Key);
 
 	// 3. copy the downloaded content into local file
-	log.Printf("(%s) copying the file (%s) locally..\n.", videoQuality, payload.Key);
+	log.Printf("(%s) copying the file locally...\n", payload.Key);
 	_, err = io.Copy(out, resp.Body)
 	if err != nil {
 		return err
 	}
-	log.Printf("(%s) saved video to local file for key %s successfully\n", videoQuality, payload.Key);
+	log.Printf("(%s) key video saved to local file successfully\n", payload.Key);
 
-	// 4. run the ffmpeg command & store in processed folder
+
+	// 4. push video processing worker the event 
+	log.Printf("(%s) publishing video downloaded event..\n", payload.Key);
+	return nats.PublishVideoDownloadedEvent(ctx, payload.Key, eventData);
+}
+
+func processVideoForFFmpeg(ctx context.Context, awsService *aws.S3Service, videoQuality string, eventData []byte) error {
+	quality, err := strconv.Atoi(videoQuality)
+	if err != nil {
+		return err
+	}
+
+	var payload *models.Payload
+	if err := json.Unmarshal(eventData, &payload); err != nil {
+		return fmt.Errorf("json unmarshal error: %v", err)
+	}
+
+	log.Printf("(%s) processing video with key %s at %dp\n", videoQuality, payload.Key, quality)
+
+	// 1. locate the raw video path
+	filename := filepath.Base(payload.Key)
+	rawPath := filepath.Join("raw", filename)
+
+	// 2. create the processed folder
 	outputFolder:= fmt.Sprintf("processed/%sp", videoQuality);
 	if err := os.MkdirAll(outputFolder, 0755);err != nil{
 		return err;
@@ -278,6 +355,7 @@ func processVideoForFFmpeg(ctx context.Context, awsService *aws.S3Service, video
 
 	outputFilePath := filepath.Join(outputFolder, filepath.Base(payload.Key));
 
+	// 3. run ffmpeg command to process the video
 	scale := fmt.Sprintf("scale=-2:%d", quality)
 	cmd := exec.CommandContext(
 		ctx,
@@ -294,9 +372,8 @@ func processVideoForFFmpeg(ctx context.Context, awsService *aws.S3Service, video
 	if err != nil {
 		return fmt.Errorf("(%s) ffmpeg error: %v, output: %s", videoQuality, err, string(b))
 	}
-	// //5. upload back to cloud
 
-
+	// 4. upload the processed video to s3
 	log.Printf("(%s) processing video done with key %s at %dp\n", videoQuality, payload.Key, quality)
 	return nil
 }

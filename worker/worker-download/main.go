@@ -19,12 +19,12 @@ func main() {
 		log.Fatalf("create video stream failed: %v", err)
 	}
 
-	// if err := nat.CreateFFmpeg480Consumer(ctx); err != nil {
-	// 	log.Fatalf("create ffmpeg 480 consumer failed: %v", err)
-	// }
+	if err := nat.CreateVideoDownloadConsumer(ctx); err != nil {
+		log.Fatalf("create video download consumer failed: %v", err)
+	}
 
-	if err := nat.ConsumeFFmpeg480Event(ctx); err != nil {
-		log.Fatalf("consume ffmpeg 480 consumer failed: %v", err)
+	if err := nat.ConsumeVideoDownlodEvent(ctx); err != nil {
+		log.Fatalf("consume video download falied: %v", err)
 	}
 
 }

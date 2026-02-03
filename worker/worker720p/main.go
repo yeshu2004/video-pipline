@@ -19,9 +19,9 @@ func main() {
 		log.Fatalf("create video stream failed: %v", err)
 	}
 
-	if err := nat.CreateFFmpeg720Consumer(ctx); err!= nil{
-		log.Fatalf("create ffmpeg 720 consumer failed: %v", err)
-	}
+	// if err := nat.CreateFFmpeg720Consumer(ctx); err!= nil{
+	// 	log.Fatalf("create ffmpeg 720 consumer failed: %v", err)
+	// }
 
 	if err := nat.ConsumeFFmpeg720Event(ctx); err != nil {
 		log.Fatalf("consume ffmpeg 720 consumer failed: %v", err)
