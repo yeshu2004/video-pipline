@@ -5,4 +5,7 @@ go.sum
 processed/240p/*
 processed/480p/*
 processed/720p/*
+processed/audio/*
 raw/*
+
+future.md
