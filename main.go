@@ -114,7 +114,7 @@ func (h *Handler) videoUplodedHandler(c *gin.Context) {
 		return
 	}
 
-	h.nats.PublishVideoUplodedEvent(ctx, payload.Key, payloadByte)
+	h.nats.PublishVideoUploadedEvent(ctx, payload.Key, payloadByte)
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "upload confirmed",

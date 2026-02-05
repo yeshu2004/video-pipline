@@ -57,30 +57,12 @@ func (nats *Nats) CreateVideoStream(ctx context.Context) error {
 }
 
 // PUBLISH EVENT
-func (nats *Nats) PublishVideoUplodedEvent(ctx context.Context, key string, payload []byte) error {
+func (nats *Nats) PublishVideoUploadedEvent(ctx context.Context, key string, payload []byte) error {
 	_, err := nats.js.Publish(ctx, "VIDEO.uploaded", payload, jetstream.WithMsgID(fmt.Sprintf("video-uploaded-%s", key)))
 	return err
 }
 
-func (nats *Nats) PublishVideoDownloadedEvent(ctx context.Context, key string, payload []byte) error {
-	_, err := nats.js.Publish(ctx, "VIDEO.downloaded", payload, jetstream.WithMsgID(fmt.Sprintf("video-downloaded-%s", key)))
-	return err
-}
-
 // CREATE CONSUMER
-func (nats *Nats) CreateVideoDownloadConsumer(ctx context.Context) error {
-	_, err := nats.js.CreateConsumer(ctx, "VIDEO", jetstream.ConsumerConfig{
-		Name:          "video-download-worker",
-		Durable:       "video-download-worker",
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		AckWait:       30 * time.Second,
-		DeliverPolicy: jetstream.DeliverNewPolicy,
-		ReplayPolicy:  jetstream.ReplayInstantPolicy,
-		MaxDeliver:    5,
-		FilterSubject: "VIDEO.uploaded",
-	})
-	return err
-}
 
 func (nats *Nats) CreateFFmpeg240Consumer(ctx context.Context) error {
 	_, err := nats.js.CreateConsumer(ctx, "VIDEO", jetstream.ConsumerConfig{
@@ -91,7 +73,7 @@ func (nats *Nats) CreateFFmpeg240Consumer(ctx context.Context) error {
 		DeliverPolicy: jetstream.DeliverNewPolicy,
 		ReplayPolicy:  jetstream.ReplayInstantPolicy,
 		MaxDeliver:    5,
-		FilterSubject: "VIDEO.downloaded",
+		FilterSubject: "VIDEO.uploaded",
 	})
 	return err
 }
@@ -105,7 +87,7 @@ func (nats *Nats) CreateFFmpeg480Consumer(ctx context.Context) error {
 		DeliverPolicy: jetstream.DeliverNewPolicy,
 		ReplayPolicy:  jetstream.ReplayInstantPolicy,
 		MaxDeliver:    5,
-		FilterSubject: "VIDEO.downloaded",
+		FilterSubject: "VIDEO.uploaded",
 	})
 	return err
 }
@@ -119,7 +101,7 @@ func (nats *Nats) CreateFFmpeg720Consumer(ctx context.Context) error {
 		DeliverPolicy: jetstream.DeliverNewPolicy,
 		ReplayPolicy:  jetstream.ReplayInstantPolicy,
 		MaxDeliver:    5,
-		FilterSubject: "VIDEO.downloaded",
+		FilterSubject: "VIDEO.uploaded",
 	})
 	return err
 }
@@ -133,18 +115,21 @@ func (nats *Nats) CreateAudioTranscription(ctx context.Context) error {
 		DeliverPolicy: jetstream.DeliverNewPolicy,
 		ReplayPolicy:  jetstream.ReplayInstantPolicy,
 		MaxDeliver:    5,
-		FilterSubject: "VIDEO.downloaded",
+		FilterSubject: "VIDEO.uploaded",
 	})
 	return err
 }
 
 // CONSUME EVENT
-
 func (nats *Nats) ConsumeAudioTranscriptionEvent(ctx context.Context) error {
 	c, err := nats.js.Consumer(ctx, "VIDEO", "audio-transcription-woker")
 	if err != nil {
 		return err
 	}
+
+	godotenv.Load()
+	cfg := aws.LoadAwsConifg()
+	service := aws.NewS3Service(cfg)
 
 	for {
 		select {
@@ -162,108 +147,12 @@ func (nats *Nats) ConsumeAudioTranscriptionEvent(ctx context.Context) error {
 			}
 
 			for msg := range msgs.Messages() {
-				if err := processAudioTranscriptionEvent(ctx, msg.Data()); err != nil {
+				if err := nats.processAudioTranscriptionEvent(ctx, service, msg.Data()); err != nil {
 					log.Println("processing failed:", err)
 					msg.Nak()
 					continue
 				}
 
-				msg.Ack()
-			}
-		}
-	}
-}
-
-func processAudioTranscriptionEvent(ctx context.Context, eventData []byte) error {
-	// 0. unmarshal the eventData
-	var payload models.Payload
-	if err := json.Unmarshal(eventData, &payload); err != nil {
-		return err
-	}
-
-	// 1. create a folder for the output audio mp3
-	rawPath := payload.Key
-	outputFolder := "processed/audio"
-	base := strings.TrimSuffix(filepath.Base(payload.Key), filepath.Ext(payload.Key))
-	outputFilePath := filepath.Join(outputFolder, base+".mp3")
-	if err := os.MkdirAll(outputFolder, 0755); err != nil {
-		return err
-	}
-	log.Printf("(%s) created output directory %s successfully\n", payload.Key, outputFolder)
-	// 2. extract the audio i.e mp3 format
-	cmd := exec.CommandContext(
-		ctx,
-		"ffmpeg",
-		"-i", rawPath,
-		"-vn",
-		"-map", "a?",
-		"-acodec", "libmp3lame",
-		"-q:a", "4",
-		outputFilePath,
-	)
-	out, err := cmd.CombinedOutput();
-	if err != nil {
-		return fmt.Errorf("ffmpeg failed: %v\noutput: %s", err, string(out))
-	}
-	log.Printf("(%s) audio extracted from the video", payload.Key)
-
-	// 3. genrate the audio transcript i.e. text format
-	info, err := os.Stat(outputFilePath)
-	if err != nil || info.Size() == 0 {
-		log.Printf("(%s) no audio stream found, skipping transcription", payload.Key)
-		return nil;
-	}
-	audioBytes, err := os.ReadFile(outputFilePath)
-	if err != nil {
-		return err
-	}
-	transcript, err := ai.GenrateTextFromAudio(ctx, audioBytes)
-	if err != nil {
-		return err
-	}
-	log.Printf("(%s) audio transcript generated: %s", payload.Key, transcript)
-
-	// 4. save the transcript to a txt file
-	txtPath := filepath.Join(outputFolder, base+".txt")
-	if err := os.WriteFile(txtPath, []byte(transcript), 0644); err != nil {
-		return err
-	}
-
-	// 4. TODO: will figure out
-	return nil
-}
-
-func (nats *Nats) ConsumeVideoDownlodEvent(ctx context.Context) error {
-	c, err := nats.js.Consumer(ctx, "VIDEO", "video-download-worker")
-	if err != nil {
-		return err
-	}
-
-	godotenv.Load()
-	cfg := aws.LoadAwsConifg()
-	service := aws.NewS3Service(cfg)
-
-	for {
-		select {
-		case <-ctx.Done():
-			log.Println("shutting down video download event consumer...")
-			return nil
-		default:
-			msgs, err := c.Fetch(1, jetstream.FetchMaxWait(30*time.Second))
-			if err != nil {
-				if errors.Is(err, jetstream.ErrNotJSMessage) {
-					continue
-				}
-				log.Println("fetch error:", err)
-				continue
-			}
-
-			for msg := range msgs.Messages() {
-				if err := nats.processEventForDownload(ctx, service, msg.Data()); err != nil {
-					log.Printf("video download consumer faile: %v\n", err)
-					msg.Nak()
-					continue
-				}
 				msg.Ack()
 			}
 		}
@@ -296,7 +185,7 @@ func (nats *Nats) ConsumeFFmpeg480Event(ctx context.Context) error {
 			}
 
 			for msg := range msgs.Messages() {
-				if err := processVideoForFFmpeg(ctx, service, "480", msg.Data()); err != nil {
+				if err := nats.processVideoForFFmpeg(ctx, service, "480", msg.Data()); err != nil {
 					log.Println("480 processing failed:", err)
 					msg.Nak()
 					continue
@@ -334,7 +223,7 @@ func (nats *Nats) ConsumeFFmpeg720Event(ctx context.Context) error {
 			}
 
 			for msg := range msgs.Messages() {
-				if err := processVideoForFFmpeg(ctx, service, "720", msg.Data()); err != nil {
+				if err := nats.processVideoForFFmpeg(ctx, service, "720", msg.Data()); err != nil {
 					log.Println("720 processing failed:", err)
 					msg.Nak()
 					continue
@@ -372,7 +261,7 @@ func (nats *Nats) ConsumeFFmpeg240Event(ctx context.Context) error {
 			}
 
 			for msg := range msgs.Messages() {
-				if err := processVideoForFFmpeg(ctx, service, "240", msg.Data()); err != nil {
+				if err := nats.processVideoForFFmpeg(ctx, service, "240", msg.Data()); err != nil {
 					log.Println("240 processing failed:", err)
 					msg.Nak()
 					continue
@@ -385,7 +274,8 @@ func (nats *Nats) ConsumeFFmpeg240Event(ctx context.Context) error {
 }
 
 // HELPER FUNCTION
-func (nats *Nats) processEventForDownload(ctx context.Context, awsService *aws.S3Service, eventData []byte) error {
+func (nats *Nats) downloadRawVideo(ctx context.Context, awsService *aws.S3Service, eventData []byte, videoQuality string) error {
+	log.Println("downloading raw video from s3 bucket...")
 	var payload models.Payload
 	if err := json.Unmarshal(eventData, &payload); err != nil {
 		return fmt.Errorf("json unmarshal error: %v", err)
@@ -409,9 +299,14 @@ func (nats *Nats) processEventForDownload(ctx context.Context, awsService *aws.S
 
 	//2. create local directory and file
 	filename := filepath.Base(payload.Key)
-	rawPath := filepath.Join("raw", filename)
+	var rawPath string;
+	if(videoQuality != "audio"){
+		rawPath = filepath.Join(fmt.Sprintf("raw/%sp",videoQuality ), filename);
+	} else {
+		rawPath = filepath.Join(fmt.Sprintf("raw/%s",videoQuality ), filename);
+	}
 
-	if err := os.MkdirAll("raw", 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(rawPath), 0755); err != nil {
 		return err
 	}
 
@@ -429,20 +324,23 @@ func (nats *Nats) processEventForDownload(ctx context.Context, awsService *aws.S
 	if err != nil {
 		return err
 	}
-	log.Printf("(%s) key video saved to local file successfully\n", payload.Key)
-
-	// 4. push video processing worker the event
-	log.Printf("(%s) publishing video downloaded event..\n", payload.Key)
-	return nats.PublishVideoDownloadedEvent(ctx, payload.Key, eventData)
+	log.Printf("(%s) key video saved locally\n", payload.Key)
+	return nil;
 }
 
-func processVideoForFFmpeg(ctx context.Context, awsService *aws.S3Service, videoQuality string, eventData []byte) error {
+func (nats *Nats) processVideoForFFmpeg(ctx context.Context, awsService *aws.S3Service, videoQuality string, eventData []byte) error {
+	log.Printf("processing ffmpeg %sp event...\n", videoQuality)
 	quality, err := strconv.Atoi(videoQuality)
 	if err != nil {
 		return err
 	}
 
-	var payload *models.Payload
+	// 0. download the video from s3 using presigned url
+	if err := nats.downloadRawVideo(ctx, awsService, eventData, videoQuality); err != nil {
+		return err
+	}
+
+	var payload models.Payload
 	if err := json.Unmarshal(eventData, &payload); err != nil {
 		return fmt.Errorf("json unmarshal error: %v", err)
 	}
@@ -451,38 +349,123 @@ func processVideoForFFmpeg(ctx context.Context, awsService *aws.S3Service, video
 
 	// 1. locate the raw video path
 	filename := filepath.Base(payload.Key)
-	rawPath := filepath.Join("raw", filename)
+	rawPath := filepath.Join(fmt.Sprintf("raw/%sp",videoQuality ), filename);
 
-	// 2. create the processed folder
-	outputFolder := fmt.Sprintf("processed/%sp", videoQuality)
-	if err := os.MkdirAll(outputFolder, 0755); err != nil {
+	// 2. local HLS output folder
+	hlsDir := filepath.Join("processed/tmp/hls", videoQuality+"p")
+
+	if err := os.MkdirAll(hlsDir, 0755); err != nil {
 		return err
 	}
-	log.Printf("(%s) created output directory %s successfully\n", videoQuality, outputFolder)
 
-	outputFilePath := filepath.Join(outputFolder, filepath.Base(payload.Key))
+	indexPath := filepath.Join(hlsDir, "index.m3u8")
+	segmentPattern := filepath.Join(hlsDir, "seg_%03d.ts")
+
+	scale := fmt.Sprintf("scale=-2:%d", quality)
 
 	// 3. run ffmpeg command to process the video
-	scale := fmt.Sprintf("scale=-2:%d", quality)
 	cmd := exec.CommandContext(
 		ctx,
 		"ffmpeg",
 		"-i", rawPath,
 		"-vf", scale,
 		"-c:v", "libx264",
-		"-crf", "23",
-		"-c:a", "copy",
-		outputFilePath,
+		"-preset", "medium",
+		"-crf", "22",
+		"-g", "48",
+		"-keyint_min", "48",
+		"-sc_threshold", "0",
+		"-c:a", "aac",
+		"-b:a", "128k",
+		"-f", "hls",
+		"-hls_time", "6",
+		"-hls_playlist_type", "vod",
+		"-hls_segment_filename", segmentPattern,
+		indexPath,
 	)
 
 	b, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("(%s) ffmpeg error: %v, output: %s", videoQuality, err, string(b))
 	}
+	log.Printf("(%s) HLS generation complete", videoQuality)
 
-	// 4. TODO: upload the processed video to s3
-	log.Printf("(%s) processing video done with key %s at %dp\n", videoQuality, payload.Key, quality)
+	// if err := awsService.UploadDirectory(ctx, payload.Bucket, hlsDir, "processed/"+videoQuality+"p/"); err != nil {
+	// 	return err
+	// }
 
-	// awsService.UploadFile(ctx, payload.Bucket,  )
+	// log.Printf("(%s) uploaded HLS to S3", videoQuality)
+
+	// // publish done event (JetStream)
+	// if err := publishDoneEvent(payload.VideoID, videoQuality+"p"); err != nil {
+	// 	return err
+	// }
+
+	log.Printf("(%s) DONE event published", videoQuality);
+	return nil
+}
+
+
+
+func (nats *Nats)processAudioTranscriptionEvent(ctx context.Context, awsService *aws.S3Service, eventData []byte) error {
+	// 0. unmarshal the eventData
+	var payload models.Payload
+	if err := json.Unmarshal(eventData, &payload); err != nil {
+		return err
+	}
+
+	if err := nats.downloadRawVideo(ctx, awsService, eventData, "audio"); err != nil{
+		return err;
+	}
+
+	// 1. create a folder for the output audio mp3
+	rawPath := filepath.Join("raw", "audio", filepath.Base(payload.Key));
+	outputFolder := "processed/audio"
+	base := strings.TrimSuffix(filepath.Base(payload.Key), filepath.Ext(payload.Key))
+	outputFilePath := filepath.Join(outputFolder, base+".mp3")
+	if err := os.MkdirAll(outputFolder, 0755); err != nil {
+		return err
+	}
+	log.Printf("(%s) created output directory %s successfully\n", payload.Key, outputFolder)
+	// 2. extract the audio i.e mp3 format
+	cmd := exec.CommandContext(
+		ctx,
+		"ffmpeg",
+		"-i", rawPath,
+		"-vn",
+		"-map", "a?",
+		"-acodec", "libmp3lame",
+		"-q:a", "4",
+		outputFilePath,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ffmpeg failed: %v\noutput: %s", err, string(out))
+	}
+	log.Printf("(%s) audio extracted from the video", payload.Key)
+
+	// 3. genrate the audio transcript i.e. text format
+	info, err := os.Stat(outputFilePath)
+	if err != nil || info.Size() == 0 {
+		log.Printf("(%s) no audio stream found, skipping transcription", payload.Key)
+		return nil
+	}
+	audioBytes, err := os.ReadFile(outputFilePath)
+	if err != nil {
+		return err
+	}
+	transcript, err := ai.GenrateTextFromAudio(ctx, audioBytes)
+	if err != nil {
+		return err
+	}
+	log.Printf("(%s) audio transcript generated: %s", payload.Key, transcript)
+
+	// 4. save the transcript to a txt file
+	txtPath := filepath.Join(outputFolder, base+".txt")
+	if err := os.WriteFile(txtPath, []byte(transcript), 0644); err != nil {
+		return err
+	}
+
+	// 4. TODO: will figure out
 	return nil
 }

@@ -2,9 +2,7 @@ go.mod
 go.sum
 .env
 
-processed/240p/*
-processed/480p/*
-processed/720p/*
+processed/tmp/hls/*
 processed/audio/*
 raw/*
 

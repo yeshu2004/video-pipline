@@ -12,7 +12,7 @@ func GenrateTextFromAudio(ctx context.Context, audioBytes []byte) ([]byte, error
 	if err != nil{
 		return nil, err
 	}
-	res, err := client.Models.GenerateContent(ctx, "gemini-3-flash", []*genai.Content{
+	res, err := client.Models.GenerateContent(ctx, "gemini-3-flash-preview", []*genai.Content{
 		{
 			Parts: []*genai.Part{
 				genai.NewPartFromBytes(audioBytes, "audio/mpeg"),
